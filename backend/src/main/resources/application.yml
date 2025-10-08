@@ -1,0 +1,21 @@
+server:
+  port: 8080
+
+spring:
+  data:
+    mongodb:
+      host: localhost
+      port: 27017
+      database: kspa_db
+  
+  application:
+    name: kspa-backend
+
+jwt:
+  secret: mySecretKey123456789012345678901234567890
+  expiration: 86400000 # 24 hours
+
+logging:
+  level:
+    com.kspa: DEBUG
+    org.springframework.security: DEBUG
