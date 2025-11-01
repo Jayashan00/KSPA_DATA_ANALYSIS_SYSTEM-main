@@ -3,147 +3,767 @@ import Header from "../components/header";
 import Slidebar from "../components/slidebar";
 import { checklistAPI } from "../services/api";
 import { toast } from "react-hot-toast";
-import { Calendar, X, ServerCrash, Clock, User, ChevronsRight, Tag, Hash, MapPin, Wrench, RefreshCw, FileText } from "lucide-react";
+import {
+  Calendar, X, ServerCrash, Clock, Wrench, ChevronsRight,
+  CheckCircle, XCircle, FileText, RefreshCw, Download, Edit3, RotateCcw,
+  Filter
+} from "lucide-react";
+import { Packer, Document, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, BorderStyle } from "docx";
+import { saveAs } from "file-saver";
 
-// --- Helper Component for Status Badge ---
+// ---------- Status Badge ----------
 const StatusBadge = ({ status }) => {
-  const statusStyles = {
+  const map = {
     PENDING: "bg-yellow-100 text-yellow-800 border-yellow-400",
     APPROVED: "bg-green-100 text-green-800 border-green-400",
     REJECTED: "bg-red-100 text-red-800 border-red-400",
   };
   return (
-    <span className={`px-3 py-1 text-sm font-semibold rounded-full border ${statusStyles[status] || "bg-gray-100 text-gray-800"}`}>
+    <span className={`px-3 py-1 text-sm font-semibold rounded-full border ${map[status] || "bg-gray-100 text-gray-800"}`}>
       {status}
     </span>
   );
 };
 
-// --- Helper function to format form data keys ---
-const formatKey = (key) => {
-  if (!key) return "";
-  const result = key.replace(/([A-Z])/g, " $1");
-  return result.charAt(0).toUpperCase() + result.slice(1);
+// ---------- Format Key ----------
+const formatKey = (k) => k ? k.replace(/([A-Z])/g, " $1").replace(/^./, s => s.toUpperCase()) : "";
+
+// ---------- Generate DOCX Report ----------
+const generateReport = async (summary, entries, status, user) => {
+  const doc = new Document({
+    sections: [{
+      children: [
+        new Paragraph({
+          children: [new TextRun({ text: `${status.toUpperCase()} CHECKLISTS REPORT`, bold: true, size: 32, color: status === "APPROVED" ? "006400" : "8B0000" })],
+          alignment: "center",
+          spacing: { after: 400 }
+        }),
+        new Paragraph({ children: [new TextRun({ text: "Date: ", bold: true }), new TextRun(new Date(summary.date).toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }))] }),
+        new Paragraph({ children: [new TextRun({ text: "Shift: ", bold: true }), new TextRun(summary.shift)] }),
+        new Paragraph({ children: [new TextRun({ text: "Location Type: ", bold: true }), new TextRun(summary.locationType || "N/A")] }),
+        new Paragraph({ children: [new TextRun({ text: `Total ${status}: `, bold: true }), new TextRun(`${entries.length}`)] }),
+        new Paragraph({ children: [new TextRun({ text: "Reviewed By: ", bold: true }), new TextRun(user?.name || "Engineer")] }),
+        new Paragraph({ spacing: { before: 300, after: 300 } }),
+        new Table({
+          width: { size: 100, type: WidthType.PERCENTAGE },
+          borders: { insideH: { style: BorderStyle.SINGLE, size: 1 }, insideV: { style: BorderStyle.SINGLE, size: 1 } },
+          rows: [
+            new TableRow({
+              children: [
+                new TableCell({ children: [new Paragraph({ text: "Machine", bold: true, color: "ffffff" })], fill: "1A5FB4" }),
+                new TableCell({ children: [new Paragraph({ text: "Section / Sub", bold: true, color: "ffffff" })], fill: "1A5FB4" }),
+                new TableCell({ children: [new Paragraph({ text: "Technician", bold: true, color: "ffffff" })], fill: "1A5FB4" }),
+                new TableCell({ children: [new Paragraph({ text: "Form Data", bold: true, color: "ffffff" })], fill: "1A5FB4" }),
+                ...(status === "REJECTED" ? [new TableCell({ children: [new Paragraph({ text: "Remarks", bold: true, color: "ffffff" })], fill: "1A5FB4" })] : [])
+              ]
+            }),
+            ...entries.map(entry => {
+              const formData = Object.entries(entry.formData || {})
+                .filter(([_, v]) => v != null && v !== "")
+                .map(([k, v]) => `${formatKey(k)}: ${v}`)
+                .join(" | ");
+              return new TableRow({
+                children: [
+                  new TableCell({ children: [new Paragraph(entry.machineName || "—")] }),
+                  new TableCell({ children: [new Paragraph(`${entry.section} / ${entry.subsection}`)] }),
+                  new TableCell({ children: [new Paragraph(entry.technicianName)] }),
+                  new TableCell({ children: [new Paragraph(formData || "No data")] }),
+                  ...(status === "REJECTED" ? [new TableCell({ children: [new Paragraph(entry.remarks || "—")] })] : [])
+                ]
+              });
+            })
+          ]
+        }),
+        new Paragraph({ spacing: { before: 600 } }),
+        new Paragraph({ children: [new TextRun({ text: "Generated On: ", bold: true }), new TextRun(new Date().toLocaleString())] }),
+        new Paragraph({ children: [new TextRun({ text: "Generated By: ", bold: true }), new TextRun(user?.name || "System")] }),
+        new Paragraph({ children: [new TextRun({ text: `All ${status.toLowerCase()} entries are listed above.`, italics: true, size: 20 })], alignment: "center" })
+      ]
+    }]
+  });
+  const blob = await Packer.toBlob(doc);
+  saveAs(blob, `${status}_Checklists_${summary.date}_${summary.shift}.docx`);
+  toast.success(`${status} report downloaded!`);
 };
 
-// --- Helper Component for Details Modal ---
-const DetailsModal = ({ summary, onClose }) => {
-  if (!summary) return null;
-
+// ---------- Action Confirmation Modal ----------
+const ActionConfirmationModal = ({
+  isOpen,
+  onClose,
+  onConfirm,
+  currentStatus,
+  newStatus,
+  remarks,
+  setRemarks
+}) => {
+  if (!isOpen) return null;
+  const getActionText = () => {
+    if (currentStatus === "PENDING") {
+      return newStatus === "APPROVED" ? "approve" : "reject";
+    } else {
+      return newStatus === "APPROVED" ? "re-approve" : "re-reject";
+    }
+  };
+  const getTitle = () => {
+    if (currentStatus === "PENDING") {
+      return `Confirm ${newStatus === "APPROVED" ? "Approval" : "Rejection"}`;
+    } else {
+      return `Change from ${currentStatus} to ${newStatus}`;
+    }
+  };
+  const needsRemarks = newStatus === "REJECTED" ||
+                      (currentStatus === "REJECTED" && newStatus === "APPROVED");
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4 animate-fade-in">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col">
-        <div className="flex justify-between items-center p-4 border-b">
-          <div>
-            <h2 className="text-xl font-bold text-gray-800">Checklist Details</h2>
-            <p className="text-gray-500">{new Date(summary.date).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} - {summary.shift} Shift</p>
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60] p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-md">
+        {/* Header */}
+        <div className={`p-4 border-b ${
+          newStatus === "APPROVED"
+            ? "bg-gradient-to-r from-green-500 to-green-600"
+            : "bg-gradient-to-r from-red-500 to-red-600"
+        } text-white rounded-t-xl`}>
+          <div className="flex justify-between items-center">
+            <h3 className="text-lg font-bold">{getTitle()}</h3>
+            <button onClick={onClose} className="p-1 rounded-full hover:bg-white/20">
+              <X size={20} />
+            </button>
           </div>
-          <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-200">
-            <X size={24} />
-          </button>
         </div>
-        <div className="overflow-y-auto p-4">
-          <div className="space-y-3">
-            {summary.entries.map(entry => (
-              <div key={entry.id} className="bg-gray-50 border rounded-lg p-3">
-                <div className="flex justify-between items-start">
-                  <div className="font-bold text-gray-700">{entry.machineName || "N/A"}</div>
-                  <StatusBadge status={entry.status} />
-                </div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2 text-sm text-gray-600">
-                  <div className="flex items-center gap-1.5"><Tag size={14} /> Section: <span className="font-medium text-gray-800">{entry.section}</span></div>
-                  <div className="flex items-center gap-1.5"><Hash size={14} /> Location ID: <span className="font-medium text-gray-800">{entry.locationId}</span></div>
-                  <div className="flex items-center gap-1.5"><MapPin size={14} /> Subsection: <span className="font-medium text-gray-800">{entry.subsection}</span></div>
-                  <div className="flex items-center gap-1.5"><User size={14} /> Technician: <span className="font-medium text-gray-800">{entry.technicianName}</span></div>
-                </div>
-                {entry.remarks && <p className="text-sm mt-2 font-medium text-red-600">Remarks: {entry.remarks}</p>}
-
-                <div className="mt-3 border-t pt-3">
-                  <details>
-                    <summary className="cursor-pointer text-sm font-medium text-orange-600 hover:text-orange-800 flex items-center gap-1">
-                      <FileText size={14} />
-                      View Submitted Data
-                    </summary>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2 mt-2 text-sm pl-4">
-                      {Object.entries(entry.formData)
-                        .filter(([key, value]) => value !== "" && value !== null)
-                        .map(([key, value]) => (
-                          <div key={key}>
-                            <span className="text-gray-500">{formatKey(key)}: </span>
-                            <strong className="text-gray-900">{String(value)}</strong>
-                          </div>
-                        ))
-                      }
-                    </div>
-                  </details>
-                </div>
-              </div>
-            ))}
-          </div>
+        {/* Body */}
+        <div className="p-6">
+          <p className="text-gray-700 mb-4">
+            Are you sure you want to {getActionText()} this checklist?
+            {needsRemarks && " Please provide a reason:"}
+          </p>
+          {needsRemarks && (
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                {newStatus === "REJECTED" ? "Rejection Reason" : "Approval Reason"}:
+              </label>
+              <textarea
+                rows={3}
+                value={remarks}
+                onChange={(e) => setRemarks(e.target.value)}
+                placeholder={`Enter reason for ${getActionText()}...`}
+                className="w-full border border-gray-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-orange-500 focus:border-orange-500"
+                required
+              />
+            </div>
+          )}
+        </div>
+        {/* Footer */}
+        <div className="border-t p-4 flex gap-3 justify-end">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 font-medium"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => {
+              if (needsRemarks && !remarks.trim()) {
+                toast.error("Reason is required.");
+                return;
+              }
+              onConfirm();
+            }}
+            className={`px-4 py-2 text-white rounded-lg font-medium ${
+              newStatus === "APPROVED"
+                ? "bg-green-600 hover:bg-green-700"
+                : "bg-red-600 hover:bg-red-700"
+            }`}
+          >
+            Confirm {getActionText().charAt(0).toUpperCase() + getActionText().slice(1)}
+          </button>
         </div>
       </div>
     </div>
   );
 };
 
+// ---------- Details Modal (WITH EDIT SUPPORT) ----------
+const DetailsModal = ({ entry, onClose, onAction, user, isEditMode = false, onToggleEdit, onRefresh }) => {
+  const [remarks, setRemarks] =useState(entry.remarks || "");
+  const [localFormData, setLocalFormData] = useState({ ...entry.formData } || {});
+  const [showConfirmation, setShowConfirmation] = useState(false);
+  const [pendingAction, setPendingAction] = useState(null);
 
-// --- Main History Component ---
+  // Detect changes
+  const hasChanges = useMemo(() => {
+    return JSON.stringify(localFormData) !== JSON.stringify(entry.formData);
+  }, [localFormData, entry.formData]);
+
+  const handleActionClick = (action) => {
+    if (action === "REJECT" ||
+        (entry.status === "APPROVED" && action === "REJECT") ||
+        (entry.status === "REJECTED" && action === "APPROVE")) {
+      setPendingAction(action);
+      setShowConfirmation(true);
+    } else {
+      handleDirectAction(action);
+    }
+  };
+
+  const handleDirectAction = async (action) => {
+    const payload = { action, remarks: remarks.trim() || undefined };
+    if (isEditMode) payload.formData = localFormData;
+    await onAction(entry.id, payload);
+    onClose();
+  };
+
+  const handleConfirmedAction = async () => {
+    const payload = {
+      action: pendingAction,
+      remarks: remarks.trim() || `Status changed to ${pendingAction === "APPROVE" ? "APPROVED" : "REJECTED"}`
+    };
+    if (isEditMode) payload.formData = localFormData;
+    await onAction(entry.id, payload);
+    setShowConfirmation(false);
+    onClose();
+  };
+
+  const handleSaveEdit = async () => {
+    if (!hasChanges) {
+      toast.info("No changes to save.");
+      return;
+    }
+
+    try {
+      await onAction(entry.id, {
+        action: "EDIT",
+        formData: localFormData,
+        remarks: remarks.trim() || undefined
+      });
+      toast.success("Data updated successfully!");
+      onClose();
+      onRefresh?.();
+    } catch (err) {
+      toast.error("Failed to save changes.");
+    }
+  };
+
+  const needsRemarks = pendingAction === "REJECT" ||
+                       (entry.status === "REJECTED" && pendingAction === "APPROVE");
+
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+        <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col">
+          {/* Header */}
+          <div className="flex justify-between items-center p-4 border-b bg-gradient-to-r from-orange-500 to-orange-600 text-white">
+            <div>
+              <h3 className="text-lg font-bold">{entry.machineName} – {isEditMode ? "Edit" : "Review"} Details</h3>
+              <p className="text-sm opacity-90">
+                {entry.section} / {entry.subsection} | Technician: {entry.technicianName}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              {entry.status !== "PENDING" && (
+                <button
+                  onClick={onToggleEdit}
+                  className="p-2 rounded-full hover:bg-white/20"
+                  title={isEditMode ? "Cancel Edit" : "Edit Data"}
+                >
+                  <Edit3 size={18} />
+                </button>
+              )}
+              <button onClick={onClose} className="p-2 rounded-full hover:bg-white/20">
+                <X size={20} />
+              </button>
+            </div>
+          </div>
+
+          {/* Body */}
+          <div className="flex-1 overflow-y-auto p-6">
+            <h4 className="font-semibold text-gray-800 mb-3">Submitted Data</h4>
+            {Object.keys(localFormData).length > 0 ? (
+              <table className="min-w-full border border-gray-300 rounded-lg overflow-hidden">
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {Object.entries(localFormData)
+                    .filter(([_, v]) => v != null && v !== "")
+                    .map(([key, value], idx) => (
+                      <tr key={key} className={idx % 2 === 0 ? "bg-gray-50" : "bg-white"}>
+                        <td className="px-4 py-2.5 font-medium text-gray-700 border-r border-gray-300" style={{ width: "35%" }}>
+                          {formatKey(key)}:
+                        </td>
+                        <td className="px-4 py-2.5 text-gray-900 font-medium" style={{ width: "65%" }}>
+                          {isEditMode ? (
+                            <input
+                              type="text"
+                              value={value}
+                              onChange={(e) => setLocalFormData(prev => ({ ...prev, [key]: e.target.value }))}
+                              className="w-full border rounded px-2 py-1 text-sm focus:ring-2 focus:ring-orange-500"
+                            />
+                          ) : (
+                            String(value)
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="text-gray-500 italic">No data submitted.</p>
+            )}
+          </div>
+
+          {/* Footer */}
+          <div className="border-t p-4 bg-gray-50 flex flex-col gap-3">
+            {/* PENDING: Approve / Reject */}
+            {entry.status === "PENDING" && !isEditMode && (
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={() => handleActionClick("APPROVE")}
+                  className="flex items-center gap-2 px-5 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium"
+                >
+                  <CheckCircle size={18} /> Approve
+                </button>
+                <button
+                  onClick={() => handleActionClick("REJECT")}
+                  className="flex items-center gap-2 px-5 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium"
+                >
+                  <XCircle size={18} /> Reject
+                </button>
+              </div>
+            )}
+
+            {/* APPROVED → Re-Reject */}
+            {entry.status === "APPROVED" && !isEditMode && (
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={() => handleActionClick("REJECT")}
+                  className="flex items-center gap-2 px-5 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium text-sm"
+                >
+                  <RotateCcw size={16} /> Change to Rejected
+                </button>
+              </div>
+            )}
+
+            {/* REJECTED → Re-Approve */}
+            {entry.status === "REJECTED" && !isEditMode && (
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={() => handleActionClick("APPROVE")}
+                  className="flex items-center gap-2 px-5 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium text-sm"
+                >
+                  <RotateCcw size={16} /> Change to Approved
+                </button>
+              </div>
+            )}
+
+            {/* Edit Mode */}
+            {isEditMode && (
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={handleSaveEdit}
+                  disabled={!hasChanges}
+                  className={`px-5 py-2 text-white rounded-lg font-medium ${
+                    hasChanges
+                      ? "bg-blue-600 hover:bg-blue-700"
+                      : "bg-gray-400 cursor-not-allowed"
+                  }`}
+                >
+                  Save Changes
+                </button>
+                <button
+                  onClick={onToggleEdit}
+                  className="px-5 py-2 border border-gray-300 rounded-lg hover:bg-gray-100 font-medium"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+
+            {/* Existing Status Change Reason */}
+            {entry.status !== "PENDING" && entry.remarks && !isEditMode && (
+              <div className="flex flex-col gap-2">
+                <p className="text-sm font-medium text-gray-700">
+                  {entry.status === "REJECTED" ? "Rejection Reason" : "Approval Notes"}:
+                </p>
+                <p className={`text-sm p-2 rounded border ${
+                  entry.status === "REJECTED"
+                    ? "bg-red-50 border-red-200 text-red-700"
+                    : "bg-green-50 border-green-200 text-green-700"
+                }`}>
+                  {entry.remarks}
+                </p>
+              </div>
+            )}
+
+            {/* Reviewed Info */}
+            {entry.status !== "PENDING" && !isEditMode && (
+              <div className="text-right text-xs text-gray-500">
+                Reviewed by: {user?.name || "Engineer"}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Confirmation Modal */}
+      <ActionConfirmationModal
+        isOpen={showConfirmation}
+        onClose={() => {
+          setShowConfirmation(false);
+          setPendingAction(null);
+        }}
+        onConfirm={handleConfirmedAction}
+        currentStatus={entry.status}
+        newStatus={pendingAction === "APPROVE" ? "APPROVED" : "REJECTED"}
+        remarks={remarks}
+        setRemarks={setRemarks}
+      />
+    </>
+  );
+};
+
+// ---------- Review Modal (UPDATED) ----------
+const ReviewModal = ({ summary, onClose, onRefresh, user }) => {
+  const [localEntries, setLocalEntries] = useState(summary.entries);
+  const [detailsEntry, setDetailsEntry] = useState(null);
+  const [isEditMode, setIsEditMode] = useState(false);
+
+  // State for sorting
+  const [sortConfig, setSortConfig] = useState({ key: 'machineName', direction: 'ascending' });
+
+  // *** NEW: State for in-modal filtering ***
+  const [machineFilter, setMachineFilter] = useState("");
+  const [sectionFilter, setSectionFilter] = useState("");
+  const [technicianFilter, setTechnicianFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState(""); // PENDING, APPROVED, REJECTED, "" (all)
+
+  const handleReviewAction = async (id, payload) => {
+    try {
+      // Use the service to update the backend
+      const { data } = await checklistAPI.reviewEntry(id, payload);
+
+      // Update local state to reflect the change immediately
+      setLocalEntries(prev =>
+        prev.map(e => e.id === id ? {
+          ...e,
+          status: payload.action === "APPROVE" ? "APPROVED" :
+                  payload.action === "REJECT" ? "REJECTED" : e.status, // Keep status on EDIT
+          remarks: payload.remarks !== undefined ? payload.remarks : e.remarks,
+          formData: payload.formData || e.formData
+        } : e)
+      );
+
+      toast.success(
+        payload.action === "EDIT" ? "Data updated!" :
+        payload.action === "APPROVE" ? "Approved!" :
+        payload.action === "REJECT" ? "Rejected!" : "Updated!"
+      );
+
+      onRefresh(); // Refresh the main history list
+    } catch (e) {
+      console.error("Failed to update entry:", e);
+      toast.error("Failed to update. Please try again.");
+    }
+  };
+
+  // Memoize filtered and sorted entries
+  const filteredAndSortedEntries = useMemo(() => {
+    let processableEntries = [...localEntries];
+
+    // 1. --- NEW: Apply Filters ---
+    processableEntries = processableEntries.filter(entry => {
+      const machineName = (entry.machineName || "").toLowerCase();
+      const section = (`${entry.section || ""} / ${entry.subsection || ""}`).toLowerCase();
+      const technician = (entry.technicianName || "").toLowerCase();
+      const status = (entry.status || "").toUpperCase();
+
+      const matchesMachine = machineName.includes(machineFilter.toLowerCase());
+      const matchesSection = section.includes(sectionFilter.toLowerCase());
+      const matchesTechnician = technician.includes(technicianFilter.toLowerCase());
+      const matchesStatus = statusFilter === "" || status === statusFilter;
+
+      return matchesMachine && matchesSection && matchesTechnician && matchesStatus;
+    });
+
+    // 2. Apply Sorting
+    if (sortConfig.key) {
+      processableEntries.sort((a, b) => {
+        let aValue, bValue;
+
+        // Special compound sort for Section + Subsection
+        if (sortConfig.key === 'section') {
+          aValue = `${a.section || ''}-${a.subsection || ''}`.toLowerCase();
+          bValue = `${b.section || ''}-${b.subsection || ''}`.toLowerCase();
+        } else {
+          aValue = (a[sortConfig.key] || '').toString().toLowerCase();
+          bValue = (b[sortConfig.key] || '').toString().toLowerCase();
+        }
+
+        if (aValue < bValue) {
+          return sortConfig.direction === 'ascending' ? -1 : 1;
+        }
+        if (aValue > bValue) {
+          return sortConfig.direction === 'ascending' ? 1 : -1;
+        }
+        return 0;
+      });
+    }
+    return processableEntries;
+  }, [localEntries, sortConfig, machineFilter, sectionFilter, technicianFilter, statusFilter]);
+
+  // Function to request sorting
+  const requestSort = (key) => {
+    let direction = 'ascending';
+    if (sortConfig.key === key && sortConfig.direction === 'ascending') {
+      direction = 'descending';
+    }
+    setSortConfig({ key, direction });
+  };
+
+  // Helper to render sort icon
+  const getSortIcon = (key) => {
+    if (sortConfig.key !== key) return null;
+    return sortConfig.direction === 'ascending' ? ' ▲' : ' ▼';
+  };
+
+  // Filter entries for reports
+  const allReviewed = localEntries.every(e => e.status !== "PENDING");
+  const approvedEntries = localEntries.filter(e => e.status === "APPROVED");
+  const rejectedEntries = localEntries.filter(e => e.status === "REJECTED");
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-7xl max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="flex justify-between items-center p-4 border-b">
+          <div>
+            <h2 className="text-xl font-bold text-gray-800">Review Checklists</h2>
+            <p className="text-gray-500">
+              {new Date(summary.date).toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}{" "}
+              – {summary.shift} Shift
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {allReviewed && (
+              <div className="flex gap-2">
+                <button
+                  onClick={() => generateReport(summary, approvedEntries, "APPROVED", user)}
+                  className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium shadow-sm"
+                >
+                  <Download size={18} /> Approved
+                </button>
+                {rejectedEntries.length > 0 && (
+                  <button
+                    onClick={() => generateReport(summary, rejectedEntries, "REJECTED", user)}
+                    className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium shadow-sm"
+                  >
+                    <Download size={18} /> Rejected
+                  </button>
+                )}
+              </div>
+            )}
+            <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-200">
+              <X size={24} />
+            </button>
+          </div>
+        </div>
+
+        {/* --- NEW: Filter Bar --- */}
+        <div className="p-4 bg-gray-50 border-b grid grid-cols-1 md:grid-cols-4 gap-3">
+          <input
+            type="text"
+            placeholder="Filter Machine..."
+            value={machineFilter}
+            onChange={e => setMachineFilter(e.target.value)}
+            className="px-3 py-1.5 border border-gray-300 rounded-md text-sm"
+          />
+          <input
+            type="text"
+            placeholder="Filter Section / Sub..."
+            value={sectionFilter}
+            onChange={e => setSectionFilter(e.target.value)}
+            className="px-3 py-1.5 border border-gray-300 rounded-md text-sm"
+          />
+          <input
+            type="text"
+            placeholder="Filter Technician..."
+            value={technicianFilter}
+            onChange={e => setTechnicianFilter(e.target.value)}
+            className="px-3 py-1.5 border border-gray-300 rounded-md text-sm"
+          />
+          <select
+            value={statusFilter}
+            onChange={e => setStatusFilter(e.target.value)}
+            className="px-3 py-1.5 border border-gray-300 rounded-md text-sm bg-white"
+          >
+            <option value="">All Statuses</option>
+            <option value="PENDING">Pending</option>
+            <option value="APPROVED">Approved</option>
+            <option value="REJECTED">Rejected</option>
+          </select>
+        </div>
+
+        {/* Table */}
+        <div className="overflow-y-auto p-4 flex-1">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50 sticky top-0">
+              <tr>
+                {/* Clickable Table Headers for Sorting */}
+                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <button onClick={() => requestSort('machineName')} className="w-full text-left font-medium">
+                    Machine {getSortIcon('machineName')}
+                  </button>
+                </th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <button onClick={() => requestSort('section')} className="w-full text-left font-medium">
+                    Section / Sub {getSortIcon('section')}
+                  </button>
+                </th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <button onClick={() => requestSort('technicianName')} className="w-full text-left font-medium">
+                    Technician {getSortIcon('technicianName')}
+                  </button>
+                </th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <button onClick={() => requestSort('status')} className="w-full text-left font-medium">
+                    Status {getSortIcon('status')}
+                  </button>
+                </th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Remarks
+                </th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Actions
+                </th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {/* Map over filteredAndSortedEntries */}
+              {filteredAndSortedEntries.length === 0 ? (
+                <tr>
+                  <td colSpan="6" className="text-center p-6 text-gray-500">
+                    No entries match the current filters.
+                  </td>
+                </tr>
+              ) : (
+                filteredAndSortedEntries.map(entry => (
+                  <tr key={entry.id} className="hover:bg-gray-50">
+                    <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">
+                      {entry.machineName || "—"}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-600">
+                      {entry.section} / {entry.subsection}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-600">
+                      {entry.technicianName}
+                    </td>
+                    <td className="px-4 py-3">
+                      <StatusBadge status={entry.status} />
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-600 max-w-xs">
+                      {entry.remarks ? (
+                        <p className={`text-xs ${entry.status === "REJECTED" ? "text-red-600" : "text-gray-600"} italic truncate`} title={entry.remarks}>
+                          {entry.remarks}
+                        </p>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-sm">
+                      <button
+                        onClick={() => {
+                          setDetailsEntry(entry);
+                          setIsEditMode(false);
+                        }}
+                        className="flex items-center gap-1 text-xs text-orange-600 hover:text-orange-800 underline"
+                      >
+                        <FileText size={14} /> {entry.status === "PENDING" ? "Review" : "View/Edit"}
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Footer */}
+        <div className="border-t p-4 flex justify-between text-sm text-gray-600">
+          <span>Showing {filteredAndSortedEntries.length} of {localEntries.length} checklist(s)</span>
+          <button onClick={onClose} className="text-orange-600 hover:underline">
+            Close
+          </button>
+        </div>
+      </div>
+
+      {/* Details Modal */}
+      {detailsEntry && (
+        <DetailsModal
+          entry={detailsEntry}
+          onClose={() => {
+            setDetailsEntry(null);
+            setIsEditMode(false);
+          }}
+          onAction={handleReviewAction}
+          user={user}
+          isEditMode={isEditMode}
+          onToggleEdit={() => setIsEditMode(prev => !prev)}
+          onRefresh={onRefresh} // Pass onRefresh down to DetailsModal
+        />
+      )}
+    </div>
+  );
+};
+
+// ---------- Main History Component (UPDATED) ----------
 const History = () => {
   const [allSummaries, setAllSummaries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedCategory, setSelectedCategory] = useState("ELECTRICAL");
+
+  // --- NEW: Enhanced Filter State ---
   const [filterDate, setFilterDate] = useState("");
+  const [filterLocation, setFilterLocation] = useState("");
+  const [filterSection, setFilterSection] = useState("");
+
   const [modalSummary, setModalSummary] = useState(null);
+  const user = JSON.parse(localStorage.getItem("user") || "{}");
 
   const groupEntriesByDateAndShift = (entries) => {
     if (!Array.isArray(entries)) return [];
-
-    const grouped = entries.reduce((acc, entry) => {
-      if (!entry.createdAt) return acc;
-      const dateObj = new Date(entry.createdAt);
-      if (isNaN(dateObj)) return acc;
-
-      const date = dateObj.toLocaleDateString('en-CA');
-      const shift = entry.shift?.toUpperCase() || 'UNKNOWN';
-      const key = `${date}|${shift}|${entry.locationType}`;
-
-      if (!acc[key]) {
-        acc[key] = {
-          date,
-          shift,
-          locationType: entry.locationType,
-          entries: [],
-        };
-      }
-      acc[key].entries.push(entry);
+    const grouped = entries.reduce((acc, e) => {
+      const d = new Date(e.createdAt);
+      if (isNaN(d.getTime())) return acc;
+      const date = d.toLocaleDateString("en-CA"); // YYYY-MM-DD format
+      const shift = (e.shift || "UNKNOWN").toUpperCase();
+      const key = `${date}|${shift}|${e.locationType}`;
+      if (!acc[key]) acc[key] = { date, shift, locationType: e.locationType, entries: [] };
+      acc[key].entries.push(e);
       return acc;
     }, {});
-
-    Object.values(grouped).forEach(summary => {
-      const allApproved = summary.entries.every(e => e.status === 'APPROVED');
-      const anyRejected = summary.entries.some(e => e.status === 'REJECTED');
-      if (anyRejected) {
-        summary.status = 'REJECTED';
-      } else if (allApproved) {
-        summary.status = 'APPROVED';
-      } else {
-        summary.status = 'PENDING';
-      }
-    });
-
-    return Object.values(grouped).sort((a, b) => new Date(b.date) - new Date(a.date) || b.shift.localeCompare(a.shift));
+    return Object.values(grouped).sort(
+      (a, b) => new Date(b.date) - new Date(a.date) || b.shift.localeCompare(a.shift)
+    );
   };
 
   const fetchHistorySummaries = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await checklistAPI.getAll();
-      const grouped = groupEntriesByDateAndShift(response.data);
+      const { data } = await checklistAPI.getAll();
+      const grouped = groupEntriesByDateAndShift(data);
       setAllSummaries(grouped);
-      toast.success("History updated!");
-    } catch (error) {
-      console.error("Failed to fetch or process history summaries:", error);
-      toast.error("Failed to fetch history summaries");
+      // Don't toast on initial load
+    } catch (e) {
+      toast.error("Failed to load history");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const handleManualRefresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const { data } = await checklistAPI.getAll();
+      const grouped = groupEntriesByDateAndShift(data);
+      setAllSummaries(grouped);
+      toast.success("History refreshed");
+    } catch (e) {
+      toast.error("Failed to load history");
     } finally {
       setLoading(false);
     }
@@ -153,88 +773,177 @@ const History = () => {
     fetchHistorySummaries();
   }, [fetchHistorySummaries]);
 
+  // --- NEW: Memoized dynamic filter options ---
+  const { uniqueLocations, uniqueSections } = useMemo(() => {
+    const locations = new Set();
+    const sections = new Set();
+
+    allSummaries
+      .filter(s => (s.locationType || "").toUpperCase() === selectedCategory)
+      .forEach(summary => {
+        summary.entries.forEach(entry => {
+          if(entry.locationId) locations.add(entry.locationId);
+          if(entry.section) sections.add(entry.section);
+        });
+      });
+
+    return {
+      uniqueLocations: [...locations].sort(),
+      uniqueSections: [...sections].sort()
+    };
+  }, [allSummaries, selectedCategory]);
+
+  // --- NEW: Updated filtering logic ---
   const filteredSummaries = useMemo(() => {
     return allSummaries
-      .filter(s => s.locationType?.toUpperCase() === selectedCategory)
-      .filter(s => !filterDate || s.date === filterDate);
-  }, [allSummaries, selectedCategory, filterDate]);
+      .filter(s => (s.locationType || "").toUpperCase() === selectedCategory)
+      .filter(s => !filterDate || s.date === filterDate)
+      .filter(s => {
+        // If no location filter, show all
+        if (!filterLocation) return true;
+        // Otherwise, show summary if *any* entry matches the location
+        return s.entries.some(e => e.locationId === filterLocation);
+      })
+      .filter(s => {
+        // If no section filter, show all
+        if (!filterSection) return true;
+        // Otherwise, show summary if *any* entry matches the section
+        return s.entries.some(e => e.section === filterSection);
+      });
+  }, [allSummaries, selectedCategory, filterDate, filterLocation, filterSection]);
+
+  // Reset filters when category changes
+  useEffect(() => {
+    setFilterLocation("");
+    setFilterSection("");
+  }, [selectedCategory]);
 
   return (
     <div className="flex bg-gray-50 min-h-screen">
       <Slidebar />
       <div className="flex-1 flex flex-col">
         <Header />
-        {/* FIX: Added ml-60 for medium screens and up to the main content area */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 md:ml-60">
           <div className="max-w-7xl mx-auto">
+            {/* Title + Tabs */}
             <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 mb-6">
               <h1 className="text-2xl font-bold text-gray-800">Checklist History</h1>
               <div className="flex items-center gap-2 p-1 bg-gray-200 rounded-full">
-                <button
-                  onClick={() => setSelectedCategory("ELECTRICAL")}
-                  className={`px-4 py-1.5 text-sm font-semibold rounded-full transition-colors ${selectedCategory === "ELECTRICAL" ? "bg-white text-orange-600 shadow" : "text-gray-600 hover:bg-gray-300"}`}
-                >
-                  Electrical
-                </button>
-                <button
-                  onClick={() => setSelectedCategory("MECHANICAL")}
-                  className={`px-4 py-1.5 text-sm font-semibold rounded-full transition-colors ${selectedCategory === "MECHANICAL" ? "bg-white text-orange-600 shadow" : "text-gray-600 hover:bg-gray-300"}`}
-                >
-                  Mechanical
-                </button>
+                {["ELECTRICAL", "MECHANICAL"].map(cat => (
+                  <button
+                    key={cat}
+                    onClick={() => setSelectedCategory(cat)}
+                    className={`px-4 py-1.5 text-sm font-semibold rounded-full transition-colors ${
+                      selectedCategory === cat
+                        ? "bg-white text-orange-600 shadow"
+                        : "text-gray-600 hover:bg-gray-300"
+                    }`}
+                  >
+                    {cat.charAt(0) + cat.slice(1).toLowerCase()}
+                  </button>
+                ))}
               </div>
             </div>
 
-            <div className="mb-6 flex items-end gap-4">
+            {/* --- NEW: Enhanced Filter Bar --- */}
+            <div className="mb-6 p-4 bg-white rounded-lg shadow-sm border grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4 items-end">
               <div>
-                <label htmlFor="filterDate" className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-1">
-                  <Calendar size={16} /> Filter by Date:
+                <label htmlFor="filterDate" className="block text-sm font-medium text-gray-700 mb-1">
+                  Filter by Date
                 </label>
                 <input
                   type="date"
                   id="filterDate"
                   value={filterDate}
-                  className="border p-2 rounded-md font-semibold cursor-pointer bg-white shadow-sm"
-                  onChange={(e) => setFilterDate(e.target.value)}
+                  onChange={e => setFilterDate(e.target.value)}
+                  className="w-full border p-2 rounded-md font-semibold cursor-pointer bg-white shadow-sm"
                 />
               </div>
+
+              <div>
+                <label htmlFor="filterLocation" className="block text-sm font-medium text-gray-700 mb-1">
+                  Filter by Location
+                </label>
+                <select
+                  id="filterLocation"
+                  value={filterLocation}
+                  onChange={e => setFilterLocation(e.target.value)}
+                  className="w-full border p-2 rounded-md font-semibold bg-white shadow-sm"
+                  disabled={uniqueLocations.length === 0}
+                >
+                  <option value="">All Locations</option>
+                  {uniqueLocations.map(loc => (
+                    <option key={loc} value={loc}>{loc}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label htmlFor="filterSection" className="block text-sm font-medium text-gray-700 mb-1">
+                  Filter by Section
+                </label>
+                <select
+                  id="filterSection"
+                  value={filterSection}
+                  onChange={e => setFilterSection(e.target.value)}
+                  className="w-full border p-2 rounded-md font-semibold bg-white shadow-sm"
+                  disabled={uniqueSections.length === 0}
+                >
+                  <option value="">All Sections</option>
+                  {uniqueSections.map(sec => (
+                    <option key={sec} value={sec}>{sec}</option>
+                  ))}
+                </select>
+              </div>
+
               <button
-                onClick={fetchHistorySummaries}
+                onClick={handleManualRefresh}
                 disabled={loading}
-                className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 text-gray-700 font-semibold rounded-md shadow-sm hover:bg-gray-100 disabled:opacity-50"
+                className="flex items-center justify-center gap-2 w-full px-4 py-2 bg-white border border-gray-300 text-gray-700 font-semibold rounded-md shadow-sm hover:bg-gray-100 disabled:opacity-50"
               >
                 <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
                 Refresh
               </button>
             </div>
 
+            {/* Content */}
             {loading ? (
-              <div className="text-center py-10">Loading history...</div>
+              <div className="text-center py-10">Loading history…</div>
             ) : filteredSummaries.length === 0 ? (
               <div className="text-center py-10 bg-white rounded-lg shadow-sm">
                 <ServerCrash size={40} className="mx-auto text-gray-400 mb-2" />
-                <p className="text-gray-500">No history found for the selected criteria.</p>
+                <p className="text-gray-500">No history found for the selected filters.</p>
               </div>
             ) : (
               <div className="space-y-4">
-                {filteredSummaries.map((summary, index) => (
+                {filteredSummaries.map((summary, idx) => (
                   <div
-                    key={index}
+                    key={idx}
                     onClick={() => setModalSummary(summary)}
                     className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 hover:shadow-md hover:border-orange-400 transition-all cursor-pointer"
                   >
                     <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3">
                       <div className="flex-1">
-                        <p className="font-bold text-lg text-gray-800">{new Date(summary.date).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
+                        <p className="font-bold text-lg text-gray-800">
+                          {new Date(summary.date).toLocaleDateString("en-US", {
+                            weekday: "long",
+                            year: "numeric",
+                            month: "long",
+                            day: "numeric",
+                          })}
+                        </p>
                         <div className="flex items-center gap-4 mt-1 text-sm text-gray-500">
-                          <span className="flex items-center gap-1.5"><Clock size={14} />{summary.shift} Shift</span>
-                          <span className="flex items-center gap-1.5"><Wrench size={14} />{summary.entries.length} Checklists</span>
+                          <span className="flex items-center gap-1.5">
+                            <Clock size={14} />
+                            {summary.shift} Shift
+                          </span>
+                          <span className="flex items-center gap-1.5">
+                            <Wrench size={14} />
+                            {summary.entries.length} Checklists
+                          </span>
                         </div>
                       </div>
-                      <div className="flex items-center gap-4">
-                        <StatusBadge status={summary.status} />
-                        <ChevronsRight className="text-gray-400" />
-                      </div>
+                      <ChevronsRight className="text-gray-400" />
                     </div>
                   </div>
                 ))}
@@ -243,7 +952,16 @@ const History = () => {
           </div>
         </main>
       </div>
-      {modalSummary && <DetailsModal summary={modalSummary} onClose={() => setModalSummary(null)} />}
+
+      {/* Review Modal */}
+      {modalSummary && (
+        <ReviewModal
+          summary={modalSummary}
+          onClose={() => setModalSummary(null)}
+          onRefresh={handleManualRefresh} // Use manual refresh to update main list
+          user={user}
+        />
+      )}
     </div>
   );
 };

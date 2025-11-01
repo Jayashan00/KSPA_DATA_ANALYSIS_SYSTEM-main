@@ -1,8 +1,11 @@
+// src/services/api.js
 import axios from 'axios';
 
 const API_BASE_URL = 'http://localhost:8080/api';
 
-// Create axios instance
+// ---------------------------------------------------------------------
+// Axios instance – all calls go through this
+// ---------------------------------------------------------------------
 const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
@@ -10,7 +13,9 @@ const api = axios.create({
   },
 });
 
-// Request interceptor to add JWT token
+// ---------------------------------------------------------------------
+// Add JWT token to every request
+// ---------------------------------------------------------------------
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('token');
@@ -19,12 +24,12 @@ api.interceptors.request.use(
     }
     return config;
   },
-  (error) => {
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
-// Response interceptor to handle token expiration
+// ---------------------------------------------------------------------
+// Global error handling – auto-logout on 401
+// ---------------------------------------------------------------------
 api.interceptors.response.use(
   (response) => response,
   (error) => {
@@ -38,7 +43,9 @@ api.interceptors.response.use(
   }
 );
 
-// Auth API calls
+// ---------------------------------------------------------------------
+// Auth API
+// ---------------------------------------------------------------------
 export const authAPI = {
   login: (empNumber, password) =>
     api.post('/auth/signin', { empNumber, password }),
@@ -47,82 +54,79 @@ export const authAPI = {
     api.post('/auth/signup', userData),
 };
 
-// User API calls
+// ---------------------------------------------------------------------
+// User API (admin)
+// ---------------------------------------------------------------------
 export const userAPI = {
-  getAllUsers: () =>
-    api.get('/admin/users'),
-
-  createUser: (userData) =>
-    api.post('/admin/users', userData),
-
-  updateUser: (id, userData) =>
-    api.put(`/admin/users/${id}`, userData),
-
-  deleteUser: (id) =>
-    api.delete(`/admin/users/${id}`),
+  getAllUsers: () => api.get('/admin/users'),
+  createUser: (userData) => api.post('/admin/users', userData),
+  updateUser: (id, userData) => api.put(`/admin/users/${id}`, userData),
+  deleteUser: (id) => api.delete(`/admin/users/${id}`),
 };
 
-// Machine API calls
+// ---------------------------------------------------------------------
+// Machine API
+// ---------------------------------------------------------------------
 export const machineAPI = {
-  getAll: () =>
-    api.get('/admin/machines'),
-
-  getAllMachines: () =>
-    api.get('/technician/machines'),
-
-  getMachinesByType: (type) =>
-    api.get(`/technician/machines/type/${type}`),
-
+  getAll: () => api.get('/admin/machines'),
+  getAllMachines: () => api.get('/technician/machines'),
+  getMachinesByType: (type) => api.get(`/technician/machines/type/${type}`),
   getMachinesByLocation: (location) =>
     api.get(`/technician/machines/location/${location}`),
 
-  create: (machineData) =>
-    api.post('/admin/machines', machineData),
-
-  update: (id, machineData) =>
-    api.put(`/admin/machines/${id}`, machineData),
-
-  delete: (id) =>
-    api.delete(`/admin/machines/${id}`),
+  create: (machineData) => api.post('/admin/machines', machineData),
+  update: (id, machineData) => api.put(`/admin/machines/${id}`, machineData),
+  delete: (id) => api.delete(`/admin/machines/${id}`),
 };
 
-// Checklist API calls
+// ---------------------------------------------------------------------
+// Checklist API
+// ---------------------------------------------------------------------
 export const checklistAPI = {
-  create: (checklistData) =>
-    api.post('/technician/checklist', checklistData),
-
+  // Technician side
+  create: (checklistData) => api.post('/technician/checklist', checklistData),
   submitChecklist: (checklistData) =>
     api.post('/technician/checklist', checklistData),
 
-  getAll: () =>
-    api.get('/engineer/checklist'),
+  getMyChecklists: () => api.get('/technician/checklist'),
 
-  getMyChecklists: () =>
-    api.get('/technician/checklist'),
+  // Engineer side – fetch all / filtered
+  getAll: () => api.get('/engineer/checklist'),
+  getAllChecklists: () => api.get('/engineer/checklist'),
 
-  getAllChecklists: () =>
-    api.get('/engineer/checklist'),
-
-  getByType: (type) =>
-    api.get(`/engineer/checklist/type/${type}`),
-
+  getByType: (type) => api.get(`/engineer/checklist/type/${type}`),
   getByLocationAndSubsection: (locationType, locationId, subsection) =>
-    api.get(`/technician/checklist/location/${locationType}/${locationId}/${subsection}`),
-
-  getByStatus: (status) =>
-    api.get(`/engineer/checklist/status/${status}`),
-
+    api.get(
+      `/technician/checklist/location/${locationType}/${locationId}/${subsection}`
+    ),
+  getByStatus: (status) => api.get(`/engineer/checklist/status/${status}`),
   getByDateRange: (startDate, endDate) =>
-    api.get(`/engineer/checklist/date-range?startDate=${startDate}&endDate=${endDate}`),
+    api.get(
+      `/engineer/checklist/date-range?startDate=${startDate}&endDate=${endDate}`
+    ),
 
+  // Update a checklist (technician edit)
   update: (id, checklistData) =>
     api.put(`/technician/checklist/${id}`, checklistData),
 
-  approve: (id) =>
-    api.put(`/engineer/checklist/${id}/approve`),
+  // -----------------------------------------------------------------
+  // Unified review endpoint – used for Approve, Reject, Re-Approve, Re-Reject
+  // Payload shape:
+  //   { action: "APPROVE" | "REJECT", remarks?: string, formData?: object }
+  // -----------------------------------------------------------------
+  reviewEntry: (id, payload) =>
+    api.put(`/engineer/checklist/${id}/review`, payload),
 
-  reject: (id, remarks) =>
-    api.put(`/engineer/checklist/${id}/reject`, { remarks }),
+  // -----------------------------------------------------------------
+  // Helper for multipart uploads (photos, docs, etc.) – optional
+  // -----------------------------------------------------------------
+  uploadFile: (id, file) => {
+    const form = new FormData();
+    form.append('file', file);
+    return api.post(`/engineer/checklist/${id}/upload`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
 };
 
 export default api;

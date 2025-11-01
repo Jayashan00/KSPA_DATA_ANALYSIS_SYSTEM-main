@@ -1,4 +1,3 @@
-// File: src/main/java/com/kspa/controller/ChecklistController.java
 package com.kspa.controller;
 
 import com.kspa.dto.ChecklistSummaryDto;
@@ -21,6 +20,7 @@ import org.springframework.web.bind.annotation.*;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 import static org.springframework.data.mongodb.core.aggregation.Aggregation.*;
 
@@ -30,11 +30,14 @@ import static org.springframework.data.mongodb.core.aggregation.Aggregation.*;
 public class ChecklistController {
 
     @Autowired
-    ChecklistEntryRepository checklistEntryRepository;
+    private ChecklistEntryRepository checklistEntryRepository;
 
     @Autowired
     private MongoTemplate mongoTemplate;
 
+    // ==============================
+    // TECHNICIAN ENDPOINTS
+    // ==============================
 
     @PostMapping("/technician/checklist")
     @PreAuthorize("hasAnyRole('ADMIN', 'ENGINEER', 'TECHNICIAN')")
@@ -45,7 +48,6 @@ public class ChecklistController {
 
             checklistEntry.setTechnicianId(userPrincipal.getId());
             checklistEntry.setTechnicianName(userPrincipal.getFullName());
-            // Status is PENDING by default when a technician creates it.
             if (checklistEntry.getStatus() == null || checklistEntry.getStatus().isEmpty()) {
                 checklistEntry.setStatus("PENDING");
             }
@@ -83,9 +85,7 @@ public class ChecklistController {
     public ResponseEntity<?> updateChecklist(@PathVariable String id,
                                              @Valid @RequestBody ChecklistEntry checklistDetails,
                                              Authentication authentication) {
-        ChecklistEntry entry = checklistEntryRepository.findById(id)
-                .orElse(null);
-
+        ChecklistEntry entry = checklistEntryRepository.findById(id).orElse(null);
         if (entry == null) {
             return ResponseEntity.badRequest()
                     .body(new MessageResponse("Error: Checklist entry not found!"));
@@ -94,21 +94,19 @@ public class ChecklistController {
         try {
             UserPrincipal userPrincipal = (UserPrincipal) authentication.getPrincipal();
 
-            // A technician can only update their own pending entries
-            if (!entry.getTechnicianId().equals(userPrincipal.getId()) && !userPrincipal.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN") || a.getAuthority().equals("ROLE_ENGINEER"))) {
-                return ResponseEntity.status(403).body(new MessageResponse("Error: You are not authorized to update this entry."));
+            if (!entry.getTechnicianId().equals(userPrincipal.getId()) &&
+                    !userPrincipal.getAuthorities().stream().anyMatch(a ->
+                            a.getAuthority().equals("ROLE_ADMIN") || a.getAuthority().equals("ROLE_ENGINEER"))) {
+                return ResponseEntity.status(403)
+                        .body(new MessageResponse("Error: You are not authorized to update this entry."));
             }
 
             entry.setFormData(checklistDetails.getFormData());
-
-            // Only update status if it's provided in the request body.
-            // Technicians might just be saving progress without changing status.
             if (checklistDetails.getStatus() != null) {
                 entry.setStatus(checklistDetails.getStatus());
             }
 
             entry.setUpdatedAt(LocalDateTime.now());
-            // Copy over other details from the new object if they exist
             entry.setMachineName(checklistDetails.getMachineName());
             entry.setSection(checklistDetails.getSection());
             entry.setLocationType(checklistDetails.getLocationType());
@@ -124,6 +122,10 @@ public class ChecklistController {
         }
     }
 
+    // ==============================
+    // ENGINEER / ADMIN ENDPOINTS
+    // ==============================
+
     @GetMapping("/engineer/checklist")
     @PreAuthorize("hasAnyRole('ADMIN', 'ENGINEER')")
     public ResponseEntity<List<ChecklistEntry>> getAllChecklists() {
@@ -131,7 +133,6 @@ public class ChecklistController {
         return ResponseEntity.ok(entries);
     }
 
-    // NEW EFFICIENT ENDPOINT FOR HISTORY PAGE
     @GetMapping("/engineer/checklist/summary")
     @PreAuthorize("hasAnyRole('ADMIN', 'ENGINEER')")
     public ResponseEntity<List<ChecklistSummaryDto>> getChecklistSummary() {
@@ -148,13 +149,23 @@ public class ChecklistController {
                         .and("_id.dateStr").as("date")
                         .and("_id.shift").as("shift")
                         .and("_id.locationType").as("locationType")
-                        .andExpression("cond(ifNull=['$statuses', false], 'PENDING', cond(eq=[indexOfArray(['$statuses', 'PENDING']), -1], 'APPROVED', 'PENDING'))").as("status")
+                        .andExpression(
+                                "cond(" +
+                                        "  [ $statuses == null, false ], " +
+                                        "  'PENDING', " +
+                                        "  cond( " +
+                                        "    [ $eq: [ { $indexOfArray: [ '$statuses', 'REJECTED' ] }, -1 ] ], " +
+                                        "    cond( [ $eq: [ { $indexOfArray: [ '$statuses', 'PENDING' ] }, -1 ] ], 'APPROVED', 'PENDING' ), " +
+                                        "    'REJECTED' " +
+                                        "  ) " +
+                                        ")")
+                        .as("status")
         );
 
-        AggregationResults<ChecklistSummaryDto> results = mongoTemplate.aggregate(aggregation, "checklist_entries", ChecklistSummaryDto.class);
+        AggregationResults<ChecklistSummaryDto> results = mongoTemplate.aggregate(
+                aggregation, "checklist_entries", ChecklistSummaryDto.class);
         return ResponseEntity.ok(results.getMappedResults());
     }
-
 
     @GetMapping("/engineer/checklist/type/{type}")
     @PreAuthorize("hasAnyRole('ADMIN', 'ENGINEER')")
@@ -183,48 +194,107 @@ public class ChecklistController {
         return ResponseEntity.ok(entries);
     }
 
-    @PutMapping("/engineer/checklist/{id}/approve")
-    @PreAuthorize("hasAnyRole('ADMIN', 'ENGINEER')")
-    public ResponseEntity<?> approveChecklist(@PathVariable String id, Authentication authentication) {
-        ChecklistEntry entry = checklistEntryRepository.findById(id)
-                .orElse(null);
+    // ==============================
+    // UNIFIED REVIEW ENDPOINT (APPROVE / REJECT / EDIT)
+    // ==============================
 
+    /**
+     * Unified endpoint for:
+     *   - APPROVE
+     *   - REJECT (requires remarks)
+     *   - EDIT   (updates formData only, keeps current status)
+     *
+     * Payload example:
+     * {
+     *   "action": "APPROVE"
+     * }
+     * {
+     *   "action": "REJECT",
+     *   "remarks": "Missing oil level"
+     * }
+     * {
+     *   "action": "EDIT",
+     *   "formData": { "temperature": "85°C", "oilLevel": "Normal" },
+     *   "remarks": "Corrected values"
+     * }
+     */
+    @PutMapping("/engineer/checklist/{id}/review")
+    @PreAuthorize("hasAnyRole('ADMIN', 'ENGINEER')")
+    public ResponseEntity<?> reviewChecklist(
+            @PathVariable String id,
+            @RequestBody Map<String, Object> payload,
+            Authentication authentication) {
+
+        ChecklistEntry entry = checklistEntryRepository.findById(id).orElse(null);
         if (entry == null) {
             return ResponseEntity.badRequest()
                     .body(new MessageResponse("Error: Checklist entry not found!"));
         }
 
-        UserPrincipal userPrincipal = (UserPrincipal) authentication.getPrincipal();
+        UserPrincipal user = (UserPrincipal) authentication.getPrincipal();
+        String action = (String) payload.get("action");
 
-        entry.setStatus("APPROVED");
-        entry.setApprovedBy(userPrincipal.getFullName());
-        entry.setApprovedAt(LocalDateTime.now());
-
-        ChecklistEntry updatedEntry = checklistEntryRepository.save(entry);
-        return ResponseEntity.ok(updatedEntry);
-    }
-
-    @PutMapping("/engineer/checklist/{id}/reject")
-    @PreAuthorize("hasAnyRole('ADMIN', 'ENGINEER')")
-    public ResponseEntity<?> rejectChecklist(@PathVariable String id,
-                                             @RequestBody MessageResponse remarks,
-                                             Authentication authentication) {
-        ChecklistEntry entry = checklistEntryRepository.findById(id)
-                .orElse(null);
-
-        if (entry == null) {
+        if (action == null) {
             return ResponseEntity.badRequest()
-                    .body(new MessageResponse("Error: Checklist entry not found!"));
+                    .body(new MessageResponse("Missing 'action' in payload"));
         }
 
-        UserPrincipal userPrincipal = (UserPrincipal) authentication.getPrincipal();
+        // -----------------------------------------------------------------
+        // 1. APPROVE
+        // -----------------------------------------------------------------
+        if ("APPROVE".equalsIgnoreCase(action)) {
+            entry.setStatus("APPROVED");
+            entry.setRemarks(null); // clear any previous remarks
+        }
 
-        entry.setStatus("REJECTED");
-        entry.setApprovedBy(userPrincipal.getFullName());
+        // -----------------------------------------------------------------
+        // 2. REJECT
+        // -----------------------------------------------------------------
+        else if ("REJECT".equalsIgnoreCase(action)) {
+            String remarks = (String) payload.get("remarks");
+            if (remarks == null || remarks.trim().isEmpty()) {
+                return ResponseEntity.badRequest()
+                        .body(new MessageResponse("Remarks are required when rejecting"));
+            }
+            entry.setStatus("REJECTED");
+            entry.setRemarks(remarks.trim());
+        }
+
+        // -----------------------------------------------------------------
+        // 3. EDIT (only formData)
+        // -----------------------------------------------------------------
+        else if ("EDIT".equalsIgnoreCase(action)) {
+            Object formDataObj = payload.get("formData");
+            if (formDataObj == null || !(formDataObj instanceof Map)) {
+                return ResponseEntity.badRequest()
+                        .body(new MessageResponse("formData (Map) is required for EDIT"));
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> formData = (Map<String, Object>) formDataObj;
+
+            entry.setFormData(formData);
+
+            // Optional remarks for audit
+            String editRemarks = (String) payload.get("remarks");
+            if (editRemarks != null && !editRemarks.trim().isEmpty()) {
+                entry.setRemarks(editRemarks.trim());
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Invalid action
+        // -----------------------------------------------------------------
+        else {
+            return ResponseEntity.badRequest()
+                    .body(new MessageResponse("Invalid action. Use 'APPROVE', 'REJECT' or 'EDIT'"));
+        }
+
+        // Common fields for all actions
+        entry.setApprovedBy(user.getFullName());
         entry.setApprovedAt(LocalDateTime.now());
-        entry.setRemarks(remarks.getMessage()); // Extract message from the DTO
+        entry.setUpdatedAt(LocalDateTime.now());
 
-        ChecklistEntry updatedEntry = checklistEntryRepository.save(entry);
-        return ResponseEntity.ok(updatedEntry);
+        ChecklistEntry saved = checklistEntryRepository.save(entry);
+        return ResponseEntity.ok(saved);
     }
 }

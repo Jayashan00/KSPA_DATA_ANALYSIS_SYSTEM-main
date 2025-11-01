@@ -12,6 +12,8 @@
   "dependencies": {
     "@tailwindcss/vite": "^4.1.11",
     "axios": "^1.11.0",
+    "docx": "^9.5.1",
+    "file-saver": "^2.0.5",
     "lucide-react": "^0.539.0",
     "lucide-vue-next": "^0.539.0",
     "react": "^19.1.1",
